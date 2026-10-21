@@ -1,0 +1,9 @@
+.DS_Store
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+__pycache__/
+.pytest_cache/
+.venv/
+local.settings.json
