@@ -1,15 +1,15 @@
 # Function App Image Optimizer
 
-Azure Functions image-optimization service extracted from the TipRanks demo. The repository contains one application and two equivalent deployment paths:
+This repository contains the image optimization Function App built for the TipRanks demo. You can deploy the same application in either of two ways:
 
-1. **Terraform** provisions the Azure resources declaratively.
-2. **Azure CLI** provisions the same resources through a Bash script.
+1. **Terraform** defines and provisions the Azure resources.
+2. **Azure CLI** provisions them with a Bash script.
 
-Both paths create a Linux Elastic Premium Function App, Azure Container Registry, host storage, private image containers, managed identities, and least-privilege role assignments. No credentials are stored in the repository.
+Both options create a Linux Elastic Premium Function App, an Azure Container Registry, host storage, private image containers, managed identities, and least-privilege role assignments. The repository does not store credentials.
 
 ## What the function does
 
-The Python v2 Function App runs ImageMagick in a hardened custom container. It accepts JPEG input, writes originals to the private `incoming` container, creates optimized variants in `optimized`, and authenticates to Blob Storage with its managed identity.
+The app uses the Python v2 programming model and runs ImageMagick in a hardened custom container. It accepts JPEG files, stores the originals in the private `incoming` container, and writes optimized versions to `optimized`. It accesses Blob Storage through its managed identity.
 
 | Route | Method | Purpose |
 |---|---|---|
@@ -18,7 +18,7 @@ The Python v2 Function App runs ImageMagick in a hardened custom container. It a
 | `/io/{name}.jpg` | GET, HEAD | Generate or retrieve a cached transformed variant |
 | `/optimized/{name}.webp` | GET, HEAD | Retrieve a default optimized image |
 
-`/io` supports width, height, DPR, fit, crop, quality, output format, orientation, trim, grayscale, brightness, contrast, saturation, sharpen, blur, and background colour. The implementation caps upload size, output size, dimensions, pixels, query length, ImageMagick memory, disk, execution time, and enabled codecs.
+The `/io` route supports width, height, DPR, fit, crop, quality, output format, orientation, trim, grayscale, brightness, contrast, saturation, sharpening, blur, and background colour. Limits are set for upload and output size, dimensions, pixel count, query length, ImageMagick memory, disk use, execution time, and enabled codecs.
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ The Python v2 Function App runs ImageMagick in a hardened custom container. It a
 - An Azure subscription ID
 - Terraform 1.6+ for the Terraform path
 
-Azure Container Registry builds the image remotely, so local Docker is not required.
+Azure Container Registry builds the image remotely. You do not need Docker installed locally.
 
 ## Option 1: Terraform
 
@@ -35,7 +35,7 @@ export AZURE_SUBSCRIPTION_ID="<subscription-id>"
 ./scripts/deploy-terraform.sh
 ```
 
-Optional Terraform inputs can be placed in `infra/terraform/terraform.tfvars`; start from `terraform.tfvars.example`. The script performs a bootstrap apply, builds the application image in the new registry, and applies the immutable image tag to the Function App.
+For custom Terraform values, copy `terraform.tfvars.example` to `infra/terraform/terraform.tfvars` and edit it. The deployment script first creates the required Azure resources, then builds the application image in the new registry and configures the Function App to use its immutable image tag.
 
 ## Option 2: Azure CLI
 
@@ -53,7 +53,7 @@ export NAME_PREFIX="imageopt"
 export RESOURCE_SUFFIX="a1b2c3"
 ```
 
-Reuse `RESOURCE_SUFFIX` when rerunning the CLI path against an existing deployment.
+When rerunning the CLI deployment against existing resources, use the same `RESOURCE_SUFFIX`.
 
 ## Try it
 
@@ -79,4 +79,4 @@ pip install -r function_app/requirements.txt
 PYTHONPATH=function_app python -m unittest discover -s tests
 ```
 
-The deployed TipRanks environment also used VNet integration, private endpoints, private DNS, and Azure Front Door. Those shared demo components are intentionally excluded here; this repository is scoped to a standalone, reachable Function App and its direct runtime dependencies.
+The TipRanks demo also used VNet integration, private endpoints, private DNS, and Azure Front Door. Those shared components are outside the scope of this repository, which deploys a standalone, reachable Function App with its direct runtime dependencies.
