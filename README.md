@@ -9,16 +9,41 @@ Both options create a Linux Elastic Premium Function App, an Azure Container Reg
 
 ## What the function does
 
-The app uses the Python v2 programming model and runs ImageMagick in a hardened custom container. It accepts JPEG files, stores the originals in the private `incoming` container, and writes optimized versions to `optimized`. It accesses Blob Storage through its managed identity.
+The app uses the Python v2 programming model and runs ImageMagick in a hardened custom container. WordPress or another uploader writes original JPEG and PNG files to the private `incoming` container. The Function does not optimize during upload. When Front Door receives an image request that is not already cached, it calls the Function, which reads the source, generates a WebP on demand, stores it in `optimized`, and returns it. The Function accesses Blob Storage through its managed identity.
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/health` | GET, HEAD | Liveness check |
-| `/upload/{name}.jpg` | POST | Upload a JPEG and create the default WebP |
-| `/io/{name}.jpg` | GET, HEAD | Generate or retrieve a cached transformed variant |
-| `/optimized/{name}.webp` | GET, HEAD | Retrieve a default optimized image |
+| `/io/{source-path}` | GET, HEAD | Generate or retrieve a cached transformed variant for a JPEG or PNG source |
 
-The `/io` route supports width, height, DPR, fit, crop, quality, output format, orientation, trim, grayscale, brightness, contrast, saturation, sharpening, blur, and background colour. Limits are set for upload and output size, dimensions, pixel count, query length, ImageMagick memory, disk use, execution time, and enabled codecs.
+The `/io` route supports nested source paths, such as `/io/2026/10/photo.jpg` and `/io/2026/10/chart.png`. It supports width, height, DPR, fit, crop, quality, output format, orientation, trim, grayscale, brightness, contrast, saturation, sharpening, blur, and background colour. Limits are set for upload and output size, dimensions, pixel count, query length, ImageMagick memory, disk use, execution time, and enabled codecs.
+
+## Front Door flow
+
+The public webpage URL and Front Door route are customer-specific. Configure them with the placeholders below:
+
+- `<PUBLIC_IMAGE_DOMAIN>` is the Front Door custom domain.
+- `<PUBLIC_IMAGE_PATH_PATTERN>` is the public JPEG/PNG/WebP path pattern.
+- `<AFD_ROUTE_PATTERN>` is the Front Door route for image requests.
+- `<AFD_REWRITE_DESTINATION>` maps the public source path to `/io/{source-path}`.
+- `<FUNCTION_ORIGIN_HOST>` is the Function App origin hostname.
+- `<SOURCE_STORAGE_ACCOUNT>` and `<SOURCE_CONTAINER>` hold the originals.
+- `<OPTIMIZED_CONTAINER>` holds generated variants.
+- `<SOURCE_PATH_PREFIX>` is an optional prefix such as `wordpress/uploads`.
+
+The intended request sequence is:
+
+```text
+Browser requests an image
+  -> Front Door edge cache hit: return cached WebP
+  -> Front Door miss: rewrite to the Function origin
+  -> Function checks the deterministic variant in Blob Storage
+  -> variant hit: return WebP
+  -> variant miss: read JPEG/PNG, run ImageMagick, save WebP, return it
+  -> Front Door caches the response
+```
+
+The visitor sees a normal webpage image request. The Function route and first-request conversion are implementation details.
 
 ## Prerequisites
 
@@ -51,6 +76,8 @@ export RESOURCE_GROUP="rg-functionapp-image-optimizer"
 export LOCATION="swedencentral"
 export NAME_PREFIX="imageopt"
 export RESOURCE_SUFFIX="a1b2c3"
+export SOURCE_PATH_PREFIX="wordpress/uploads"
+export DEFAULT_WEBP_QUALITY="85"
 ```
 
 When rerunning the CLI deployment against existing resources, use the same `RESOURCE_SUFFIX`.
@@ -61,14 +88,11 @@ When rerunning the CLI deployment against existing resources, use the same `RESO
 FUNCTION_URL="https://<function-app-name>.azurewebsites.net"
 curl --fail "$FUNCTION_URL/health"
 curl --fail \
-  --request POST \
-  --header "Content-Type: image/jpeg" \
-  --data-binary @sample.jpg \
-  "$FUNCTION_URL/upload/sample.jpg"
-curl --fail \
-  "$FUNCTION_URL/io/sample.jpg?width=640&height=360&fit=cover&format=webp&quality=82" \
+  "$FUNCTION_URL/io/2026/10/sample.jpg?width=640&height=360&fit=cover&format=webp&quality=82" \
   --output sample-optimized.webp
 ```
+
+Upload originals directly to the configured private source container. The Function App no longer exposes an upload endpoint and never performs conversion during upload.
 
 ## Local tests
 

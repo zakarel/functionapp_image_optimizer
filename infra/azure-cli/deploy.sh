@@ -7,6 +7,8 @@ RESOURCE_GROUP="${RESOURCE_GROUP:-rg-functionapp-image-optimizer}"
 LOCATION="${LOCATION:-swedencentral}"
 NAME_PREFIX="${NAME_PREFIX:-imageopt}"
 IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y%m%d.%H%M%S)}"
+SOURCE_PATH_PREFIX="${SOURCE_PATH_PREFIX:-}"
+DEFAULT_WEBP_QUALITY="${DEFAULT_WEBP_QUALITY:-85}"
 
 if [[ -z "$SUBSCRIPTION_ID" ]]; then
   echo "Set AZURE_SUBSCRIPTION_ID before running this script." >&2
@@ -127,6 +129,8 @@ az functionapp config appsettings set \
     "IMAGE_STORAGE_ACCOUNT=$IMAGE_STORAGE" \
     IMAGE_INPUT_CONTAINER=incoming \
     IMAGE_OUTPUT_CONTAINER=optimized \
+    "SOURCE_PATH_PREFIX=$SOURCE_PATH_PREFIX" \
+    "DEFAULT_WEBP_QUALITY=$DEFAULT_WEBP_QUALITY" \
     WEBSITES_ENABLE_APP_SERVICE_STORAGE=false \
     AzureFunctionsJobHost__Logging__Console__IsEnabled=true \
   --output none

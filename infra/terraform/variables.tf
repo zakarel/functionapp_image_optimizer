@@ -38,3 +38,19 @@ variable "container_image_tag" {
   default     = ""
 }
 
+variable "source_path_prefix" {
+  description = "Optional Blob prefix containing original WordPress images."
+  type        = string
+  default     = ""
+}
+
+variable "default_webp_quality" {
+  description = "Default ImageMagick WebP quality for GET-on-demand generation."
+  type        = number
+  default     = 85
+
+  validation {
+    condition     = var.default_webp_quality >= 1 && var.default_webp_quality <= 100
+    error_message = "default_webp_quality must be between 1 and 100."
+  }
+}

@@ -2,4 +2,5 @@ subscription_id     = "00000000-0000-0000-0000-000000000000"
 resource_group_name = "rg-functionapp-image-optimizer"
 location            = "swedencentral"
 name_prefix         = "imageopt"
-
+source_path_prefix  = "wordpress/uploads"
+default_webp_quality = 85
