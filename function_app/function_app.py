@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import azure.functions as func
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
@@ -23,12 +23,17 @@ MAX_OUTPUT_BYTES = 40 * 1024 * 1024
 MAX_DIMENSION = 4096
 MAX_PIXELS = 16_777_216
 MAX_QUERY_LENGTH = 512
-DEFAULT_QUALITY = 85
+try:
+    DEFAULT_QUALITY = int(os.environ.get("DEFAULT_WEBP_QUALITY", "85"))
+except ValueError as exc:
+    raise RuntimeError("DEFAULT_WEBP_QUALITY must be an integer from 1 to 100.") from exc
+if not 1 <= DEFAULT_QUALITY <= 100:
+    raise RuntimeError("DEFAULT_WEBP_QUALITY must be an integer from 1 to 100.")
 DEFAULT_CACHE_CONTROL = "public, max-age=3600"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 IMAGE_NAME_PATTERN = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,195}\.(?:jpe?g)$",
+    r"^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,195}/)*[A-Za-z0-9][A-Za-z0-9._-]{0,195}\.(?:jpe?g|png)$",
     re.IGNORECASE,
 )
 HEX_COLOR_PATTERN = re.compile(r"^#?[0-9A-Fa-f]{6}$")
@@ -118,6 +123,11 @@ def _blob_service() -> BlobServiceClient:
         account_url=f"https://{os.environ['IMAGE_STORAGE_ACCOUNT']}.blob.core.windows.net",
         credential=DefaultAzureCredential(),
     )
+
+
+def _source_blob_name(name: str) -> str:
+    prefix = os.environ.get("SOURCE_PATH_PREFIX", "").strip("/")
+    return f"{prefix}/{name}" if prefix else name
 
 
 def _error(message: str, status_code: int) -> func.HttpResponse:
@@ -477,18 +487,27 @@ def _build_transform_args(
     return args
 
 
-def _transform_jpeg(
+def _detect_image_format(data: bytes) -> str:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    raise ImageMagickConversionError("The source file is not a supported JPEG or PNG image.")
+
+
+def _transform_image(
     data: bytes,
+    source_format: str,
     options: TransformOptions,
 ) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
-    source_dimensions = _identify(data, "jpeg")
+    source_dimensions = _identify(data, source_format)
     with tempfile.TemporaryDirectory(prefix="image-conversion-") as directory:
         extension = "jpg" if options.output_format == "jpeg" else options.output_format
         output_path = Path(directory) / f"output.{extension}"
         command = [
             "convert",
             *_resource_limits(),
-            "jpeg:-",
+            f"{source_format}:-",
             *_build_transform_args(options, source_dimensions),
             f"{IMAGEMAGICK_FORMATS[options.output_format]}:{output_path}",
         ]
@@ -537,6 +556,7 @@ def _variant_key(
 def _io_info(
     source_size: int,
     source_dimensions: tuple[int, int],
+    source_format: str,
     output_size: int,
     output_dimensions: tuple[int, int],
     output_format: str,
@@ -544,7 +564,7 @@ def _io_info(
     return (
         f"ifsz={source_size} "
         f"idim={source_dimensions[0]}x{source_dimensions[1]} "
-        f"ifmt=jpeg "
+        f"ifmt={source_format} "
         f"ofsz={output_size} "
         f"odim={output_dimensions[0]}x{output_dimensions[1]} "
         f"ofmt={output_format}"
@@ -552,74 +572,14 @@ def _io_info(
 
 
 @app.route(
-    route="upload/{name}",
-    methods=["POST"],
-    auth_level=func.AuthLevel.ANONYMOUS,
-)
-def upload_image(req: func.HttpRequest) -> func.HttpResponse:
-    name = req.route_params.get("name", "")
-    if not IMAGE_NAME_PATTERN.fullmatch(name):
-        return _error("Use a simple .jpg or .jpeg filename.", 400)
-
-    data = req.get_body()
-    if not data:
-        return _error("The request body is empty.", 400)
-    if len(data) > MAX_UPLOAD_BYTES:
-        return _error("The image exceeds the 20 MB upload limit.", 413)
-    if not data.startswith(b"\xff\xd8\xff"):
-        return _error("The request body is not a JPEG image.", 415)
-
-    try:
-        encoded, source_dimensions, output_dimensions = _transform_jpeg(
-            data,
-            TransformOptions(),
-        )
-    except ImageMagickConversionError as exc:
-        return _error(str(exc), 422)
-
-    stem, _ = os.path.splitext(name)
-    output_name = f"{stem}.webp"
-    service = _blob_service()
-    service.get_container_client(os.environ["IMAGE_INPUT_CONTAINER"]).upload_blob(
-        name=name,
-        data=data,
-        overwrite=True,
-        content_settings=ContentSettings(content_type="image/jpeg"),
-    )
-    service.get_container_client(os.environ["IMAGE_OUTPUT_CONTAINER"]).upload_blob(
-        name=output_name,
-        data=io.BytesIO(encoded),
-        overwrite=True,
-        content_settings=ContentSettings(
-            content_type="image/webp",
-            cache_control=DEFAULT_CACHE_CONTROL,
-        ),
-    )
-    return func.HttpResponse(
-        f"Uploaded {name} and created {output_name}.",
-        status_code=201,
-        headers={
-            "X-Image-Encoder": "ImageMagick",
-            "X-TipRanks-IO-Info": _io_info(
-                len(data),
-                source_dimensions,
-                len(encoded),
-                output_dimensions,
-                "webp",
-            ),
-        },
-    )
-
-
-@app.route(
-    route="io/{name}",
+    route="io/{*name}",
     methods=["GET", "HEAD"],
     auth_level=func.AuthLevel.ANONYMOUS,
 )
 def image_optimizer(req: func.HttpRequest) -> func.HttpResponse:
     name = req.route_params.get("name", "")
     if not IMAGE_NAME_PATTERN.fullmatch(name):
-        return _error("Use the original .jpg or .jpeg filename.", 400)
+        return _error("Use a nested .jpg, .jpeg, or .png source path.", 400)
     if len(req.url.partition("?")[2]) > MAX_QUERY_LENGTH:
         return _error("The transformation query is too long.", 400)
 
@@ -631,7 +591,7 @@ def image_optimizer(req: func.HttpRequest) -> func.HttpResponse:
     service = _blob_service()
     source_blob = service.get_blob_client(
         container=os.environ["IMAGE_INPUT_CONTAINER"],
-        blob=name,
+        blob=_source_blob_name(name),
     )
     try:
         source_properties = source_blob.get_blob_properties()
@@ -665,21 +625,42 @@ def image_optimizer(req: func.HttpRequest) -> func.HttpResponse:
     if len(source) > MAX_UPLOAD_BYTES:
         return _error("The source image exceeds the 20 MB processing limit.", 413)
     try:
-        encoded, source_dimensions, output_dimensions = _transform_jpeg(
+        source_format = _detect_image_format(source)
+        encoded, source_dimensions, output_dimensions = _transform_image(
             source,
+            source_format,
             options,
         )
     except ImageMagickConversionError as exc:
         return _error(str(exc), 422)
 
-    variant_blob.upload_blob(
-        data=io.BytesIO(encoded),
-        overwrite=False,
-        content_settings=ContentSettings(
-            content_type=CONTENT_TYPES[options.output_format],
-            cache_control=IMMUTABLE_CACHE_CONTROL,
-        ),
-    )
+    try:
+        variant_blob.upload_blob(
+            data=io.BytesIO(encoded),
+            overwrite=False,
+            content_settings=ContentSettings(
+                content_type=CONTENT_TYPES[options.output_format],
+                cache_control=IMMUTABLE_CACHE_CONTROL,
+            ),
+        )
+    except ResourceExistsError:
+        variant_properties = variant_blob.get_blob_properties()
+        encoded = (
+            b""
+            if req.method == "HEAD"
+            else variant_blob.download_blob().readall()
+        )
+        return func.HttpResponse(
+            body=encoded,
+            status_code=200,
+            mimetype=CONTENT_TYPES[options.output_format],
+            headers={
+                "Cache-Control": IMMUTABLE_CACHE_CONTROL,
+                "X-TipRanks-IO-Cache": "VARIANT_RACE_HIT",
+                "X-TipRanks-IO-Variant": variant_name,
+                "ETag": str(variant_properties.etag),
+            },
+        )
     return func.HttpResponse(
         body=b"" if req.method == "HEAD" else encoded,
         status_code=200,
@@ -691,41 +672,11 @@ def image_optimizer(req: func.HttpRequest) -> func.HttpResponse:
             "X-TipRanks-IO-Info": _io_info(
                 len(source),
                 source_dimensions,
+                source_format,
                 len(encoded),
                 output_dimensions,
                 options.output_format,
             ),
-        },
-    )
-
-
-@app.route(
-    route="optimized/{name}",
-    methods=["GET", "HEAD"],
-    auth_level=func.AuthLevel.ANONYMOUS,
-)
-def optimized_image(req: func.HttpRequest) -> func.HttpResponse:
-    name = req.route_params.get("name", "")
-    if not name.lower().endswith(".webp"):
-        return _error("Only WebP images are available.", 400)
-
-    blob = _blob_service().get_blob_client(
-        container=os.environ["IMAGE_OUTPUT_CONTAINER"],
-        blob=name,
-    )
-    try:
-        properties = blob.get_blob_properties()
-        body = b"" if req.method == "HEAD" else blob.download_blob().readall()
-    except ResourceNotFoundError:
-        return _error("Image not found.", 404)
-
-    return func.HttpResponse(
-        body=body,
-        status_code=200,
-        mimetype=properties.content_settings.content_type or "image/webp",
-        headers={
-            "Cache-Control": properties.content_settings.cache_control
-            or DEFAULT_CACHE_CONTROL
         },
     )
 

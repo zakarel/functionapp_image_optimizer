@@ -101,6 +101,8 @@ resource "azurerm_linux_function_app" "main" {
     IMAGE_STORAGE_ACCOUNT                              = azurerm_storage_account.images.name
     IMAGE_INPUT_CONTAINER                              = azurerm_storage_container.incoming.name
     IMAGE_OUTPUT_CONTAINER                             = azurerm_storage_container.optimized.name
+    SOURCE_PATH_PREFIX                                 = var.source_path_prefix
+    DEFAULT_WEBP_QUALITY                               = tostring(var.default_webp_quality)
     WEBSITES_ENABLE_APP_SERVICE_STORAGE                = "false"
     AzureFunctionsJobHost__Logging__Console__IsEnabled = "true"
   }

@@ -1,11 +1,16 @@
 import unittest
+import os
 
 from function_app import (
+    IMAGE_NAME_PATTERN,
+    ImageMagickConversionError,
     InvalidTransformError,
     TransformOptions,
     _build_transform_args,
     _crop_geometry,
+    _detect_image_format,
     _parse_options,
+    _source_blob_name,
     _variant_key,
 )
 
@@ -36,6 +41,26 @@ class ParseOptionsTests(unittest.TestCase):
     def test_output_limit_is_enforced_after_dpr(self):
         with self.assertRaisesRegex(InvalidTransformError, "exceeds 4096"):
             _parse_options({"width": "3000", "dpr": "2"})
+
+    def test_nested_jpeg_and_png_paths_are_supported(self):
+        self.assertTrue(IMAGE_NAME_PATTERN.fullmatch("2026/10/photo.jpg"))
+        self.assertTrue(IMAGE_NAME_PATTERN.fullmatch("2026/10/chart.png"))
+        self.assertFalse(IMAGE_NAME_PATTERN.fullmatch("../photo.jpg"))
+        self.assertEqual(_source_blob_name("2026/10/photo.jpg"), "2026/10/photo.jpg")
+
+    def test_source_prefix_is_applied_without_path_traversal(self):
+        previous = os.environ.get("SOURCE_PATH_PREFIX")
+        os.environ["SOURCE_PATH_PREFIX"] = "wordpress/uploads/"
+        try:
+            self.assertEqual(
+                _source_blob_name("2026/10/photo.png"),
+                "wordpress/uploads/2026/10/photo.png",
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("SOURCE_PATH_PREFIX", None)
+            else:
+                os.environ["SOURCE_PATH_PREFIX"] = previous
 
 
 class ImageMagickCommandTests(unittest.TestCase):
@@ -103,6 +128,28 @@ class VariantTests(unittest.TestCase):
         self.assertNotEqual(first, changed_transform)
         self.assertTrue(first.startswith("variants/photo/"))
         self.assertTrue(first.endswith(".webp"))
+
+
+class SourceFormatTests(unittest.TestCase):
+    def test_jpeg_and_png_signatures_are_detected(self):
+        self.assertEqual(_detect_image_format(b"\xff\xd8\xffrest"), "jpeg")
+        self.assertEqual(
+            _detect_image_format(b"\x89PNG\r\n\x1a\nrest"),
+            "png",
+        )
+
+    def test_unsupported_signature_is_rejected(self):
+        with self.assertRaisesRegex(ImageMagickConversionError, "supported JPEG or PNG"):
+            _detect_image_format(b"GIF89a")
+
+
+class FunctionRouteTests(unittest.TestCase):
+    def test_only_get_delivery_and_health_routes_are_registered(self):
+        from function_app import app
+
+        routes = {function._trigger.route: function._trigger.methods for function in app.get_functions()}
+        self.assertEqual(set(routes), {"io/{*name}", "health"})
+        self.assertEqual({method.value for method in routes["io/{*name}"]}, {"GET", "HEAD"})
 
 
 if __name__ == "__main__":
